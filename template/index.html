@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Compact Action Piano</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        body {
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background: #BDB5D5;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: #2b2238;
+            overflow: hidden;
+        }
+
+        header {
+            padding: 10px 18px 4px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            z-index: 10;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.35rem;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+            color: #231b30;
+        }
+
+        p {
+            margin: 2px 0 0;
+            font-size: 0.82rem;
+            color: #4e4460;
+            font-weight: 500;
+        }
+
+        .status-badge {
+            position: absolute;
+            right: 20px;
+            top: 12px;
+            font-size: 0.75rem;
+            padding: 5px 12px;
+            border-radius: 14px;
+            background: rgba(43, 34, 56, 0.08);
+            border: 1px solid rgba(43, 34, 56, 0.18);
+            color: #1e5229;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: #22c55e;
+            box-shadow: 0 0 6px #22c55e;
+        }
+
+        .stage {
+            flex: 1;
+            position: relative;
+            width: 100%;
+            cursor: pointer;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        @media (max-width: 640px) {
+            header {
+                padding-top: 8px;
+            }
+            h1 {
+                font-size: 1.1rem;
+            }
+            p {
+                font-size: 0.75rem;
+            }
+            .status-badge {
+                position: static;
+                margin-top: 6px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Compact Action Piano</h1>
+        <p>Play on your physical 3D portable piano</p>
+        <div id="status" class="status-badge">
+            <span class="status-dot"></span>
+            <span>Connecting</span>
+        </div>
+    </header>
+
+    <div class="stage">
+        <canvas id="view"></canvas>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.min.js"></script>
+    <script>
+        const socket = typeof io !== 'undefined' ? io() : null;
+        const cvs = document.getElementById('view');
+        const ctx = cvs.getContext('2d');
+        const statEl = document.getElementById('status');
+
+        let actx = null;
+        let pressed = {};
+        let activeBeams = [];
+        let mousePitchPressed = null;
+
+        const WHITE_KEYS = [
+            { id: 60, i: 0 }, { id: 62, i: 1 }, { id: 64, i: 2 },
+            { id: 65, i: 3 }, { id: 67, i: 4 }, { id: 69, i: 5 }, { id: 71, i: 6 }
+        ];
+
+        const BLACK_KEYS = [
+            { id: 61, r: 0.7 }, { id: 63, r: 1.7 }, { id: 66, r: 3.7 },
+            { id: 68, r: 4.7 }, { id: 70, r: 5.7 }
+        ];
+
+        const KEY_MAP = {};
+        WHITE_KEYS.forEach(k => KEY_MAP[k.id] = { isWhite: true, pos: k.i });
+        BLACK_KEYS.forEach(k => KEY_MAP[k.id] = { isWhite: false, pos: k.r });
+
+        function resize() {
+            cvs.width = cvs.parentElement.clientWidth;
+            cvs.height = cvs.parentElement.clientHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        function initAudio() {
+            if (!actx) {
+                actx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (actx && actx.state === 'suspended') {
+                actx.resume();
+            }
+        }
+
+        function playSynth(pitch, vol) {
+            initAudio();
+            if (!actx) return;
+
+            const hz = 440 * Math.pow(2, (pitch - 69) / 12);
+            const now = actx.currentTime;
+
+            const osc1 = actx.createOscillator();
+            const osc2 = actx.createOscillator();
+            const gain = actx.createGain();
+
+            osc1.type = 'triangle';
+            osc1.frequency.setValueAtTime(hz, now);
+
+            osc2.type = 'sine';
+            osc2.frequency.setValueAtTime(hz * 2, now);
+
+            const velocityFactor = (vol || 64) / 127;
+            const targetGain = velocityFactor * 0.3;
+
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(targetGain, now + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.4);
+
+            osc1.connect(gain);
+            osc2.connect(gain);
+            gain.connect(actx.destination);
+
+            osc1.start(now);
+            osc2.start(now);
+            osc1.stop(now + 1.4);
+            osc2.stop(now + 1.4);
+        }
+
+        function triggerNoteOn(note, velocity) {
+            if (pressed[note] !== undefined) return;
+            initAudio();
+            const hue = (note % 12) * 30;
+            pressed[note] = hue;
+            playSynth(note, velocity || 80);
+            activeBeams.push({
+                id: note,
+                h: hue,
+                top: cvs.height * 0.42,
+                bot: cvs.height * 0.42,
+                active: true
+            });
+        }
+
+        function triggerNoteOff(note) {
+            delete pressed[note];
+            for (let i = 0; i < activeBeams.length; i++) {
+                if (activeBeams[i].id === note && activeBeams[i].active) {
+                    activeBeams[i].active = false;
+                }
+            }
+        }
+
+        if (socket) {
+            socket.on('connect', () => {
+                statEl.innerHTML = `<span class="status-dot"></span><span>Live Stream Ready</span>`;
+            });
+
+            socket.on('piano_note', (e) => {
+                const st = e.status || e.action;
+                if (st === 'on') {
+                    triggerNoteOn(e.note, e.velocity);
+                } else if (st === 'off') {
+                    triggerNoteOff(e.note);
+                }
+            });
+        }
+
+        function getPitchFromCoords(clientX, clientY) {
+            const rect = cvs.getBoundingClientRect();
+            const x = clientX - rect.left;
+            const y = clientY - rect.top;
+
+            const wW = cvs.width / 7;
+            const bW = wW * 0.58;
+            const kTop = cvs.height * 0.42;
+            const kH = cvs.height * 0.58;
+            const bH = kH * 0.6;
+
+            if (y < kTop) return null;
+
+            if (y <= kTop + bH) {
+                for (let i = 0; i < BLACK_KEYS.length; i++) {
+                    const k = BLACK_KEYS[i];
+                    const bx = k.r * wW - (bW / 2);
+                    if (x >= bx && x <= bx + bW) {
+                        return k.id;
+                    }
+                }
+            }
+
+            const whiteIndex = Math.floor(x / wW);
+            const keyMatch = WHITE_KEYS.find(k => k.i === whiteIndex);
+            return keyMatch ? keyMatch.id : null;
+        }
+
+        function handlePointerDown(e) {
+            e.preventDefault();
+            const pitch = getPitchFromCoords(e.clientX, e.clientY);
+            if (pitch !== null) {
+                mousePitchPressed = pitch;
+                triggerNoteOn(pitch, 90);
+            }
+        }
+
+        function handlePointerMove(e) {
+            if (mousePitchPressed === null) return;
+            const pitch = getPitchFromCoords(e.clientX, e.clientY);
+            if (pitch !== mousePitchPressed) {
+                triggerNoteOff(mousePitchPressed);
+                if (pitch !== null) {
+                    mousePitchPressed = pitch;
+                    triggerNoteOn(pitch, 90);
+                } else {
+                    mousePitchPressed = null;
+                }
+            }
+        }
+
+        function handlePointerUp() {
+            if (mousePitchPressed !== null) {
+                triggerNoteOff(mousePitchPressed);
+                mousePitchPressed = null;
+            }
+        }
+
+        cvs.addEventListener('pointerdown', handlePointerDown);
+        window.addEventListener('pointermove', handlePointerMove);
+        window.addEventListener('pointerup', handlePointerUp);
+
+        function draw() {
+            ctx.clearRect(0, 0, cvs.width, cvs.height);
+
+            const wW = cvs.width / 7;
+            const bW = wW * 0.58;
+            const kTop = cvs.height * 0.42;
+            const kH = cvs.height * 0.58;
+            const bH = kH * 0.6;
+
+            for (let i = activeBeams.length - 1; i >= 0; i--) {
+                const bm = activeBeams[i];
+                const meta = KEY_MAP[bm.id];
+                if (!meta) continue;
+
+                let x = meta.isWhite ? meta.pos * wW + (wW * 0.1) : meta.pos * wW - (bW / 2);
+                let w = meta.isWhite ? wW * 0.8 : bW;
+
+                bm.top -= 6;
+                if (!bm.active) bm.bot -= 6;
+
+                ctx.fillStyle = `hsl(${bm.h}, 90%, 55%)`;
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = `hsl(${bm.h}, 90%, 55%)`;
+                ctx.fillRect(x, bm.top, w, bm.bot - bm.top);
+                ctx.shadowBlur = 0;
+
+                if (bm.bot < 0) activeBeams.splice(i, 1);
+            }
+
+            for (let i = 0; i < WHITE_KEYS.length; i++) {
+                const k = WHITE_KEYS[i];
+                const x = k.i * wW;
+                const h = pressed[k.id];
+
+                ctx.fillStyle = h !== undefined ? `hsl(${h}, 85%, 65%)` : '#e8e2e5';
+                ctx.fillRect(x + 2, kTop, wW - 4, kH);
+                ctx.strokeStyle = 'rgba(43, 34, 56, 0.18)';
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(x + 2, kTop, wW - 4, kH);
+            }
+
+            for (let i = 0; i < BLACK_KEYS.length; i++) {
+                const k = BLACK_KEYS[i];
+                const x = k.r * wW - (bW / 2);
+                const h = pressed[k.id];
+
+                ctx.fillStyle = h !== undefined ? `hsl(${h}, 85%, 60%)` : '#251f2d';
+                ctx.fillRect(x, kTop, bW, bH);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, kTop, bW, bH);
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        requestAnimationFrame(draw);
+    </script>
+</body>
+</html>
