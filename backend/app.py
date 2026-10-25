@@ -91,4 +91,4 @@ if __name__ == "__main__":
     ble_thread.start()
     #sockettio.run() run the web server while blocking the main thread to listen to the piano notes without being interrupted
     socketio.run(app, debug = True, port = 5000)
-    #Type https://localhost:5000 to access the website
+    #Open the website by using the html file in template while running this code
