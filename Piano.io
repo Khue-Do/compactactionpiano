@@ -9,8 +9,8 @@ bool input5, input6, input7, input8, input9;
 bool input10, input11, input12;
 
 void setup() {
-  // This is the Bluetooth name shown on your computer.
-  SerialBT.begin("ESP32_Inputs");
+  //Name of Device
+  SerialBT.begin("Piano");
 
   pinMode(2, INPUT_PULLDOWN);
   pinMode(4, INPUT_PULLDOWN);
@@ -28,7 +28,7 @@ void setup() {
 }
 
 void loop() {
-  // Read the 13 inputs.
+  // Read the 13 inputs
   input0  = digitalRead(2);
   input1  = digitalRead(4);
   input2  = digitalRead(5);
@@ -43,7 +43,7 @@ void loop() {
   input11 = digitalRead(26);
   input12 = digitalRead(33);
 
-  // Store each input in its matching bit.
+  // Store each input 
   bitWrite(bits, 0, input0);
   bitWrite(bits, 1, input1);
   bitWrite(bits, 2, input2);
