@@ -9,19 +9,21 @@ import serial
 app = Flask(__name__, template_folder=os.path.join(os.path.dirname(__file__), "../template"))
 socketio = SocketIO(app, async_mode="threading")
 
-#Set PIANO_PORT to ESP32_Inputs' outgoing Bluetooth COM port.
+#Set the port environment to detect which one to connect
 BLUETOOTH_PORT = os.environ.get("PIANO_PORT", "")
-#First 7 inputs: white keys left to right. Next 5: black keys left to right.
+#This tuple's items are in order: 7 lower keys then 5 upper keys
 KEY_NOTES = (60, 62, 64, 65, 67, 69, 71, 61, 63, 66, 68, 70)
-current_bits = 0
+current_bits = 0 #Keep track of the keys' states, it equals to 0 means it's not pressed
 received_bits = None
 
 
 def debug_snapshot():
+    #This function is for reading the data and turn it into a formatted 12-charcter binary string of key states
     return {"bits": received_bits, "keys": f"{current_bits:012b}" if received_bits is not None else None}
 
 
 def report_bluetooth(bits):
+    #This function updates the bits
     global received_bits
     received_bits = bits
     socketio.emit("bluetooth_debug", debug_snapshot())
@@ -29,16 +31,17 @@ def report_bluetooth(bits):
 
 @socketio.on("connect")
 def send_bluetooth_debug():
+    #This function is to open a new tab whenevr the web sever is connected
     socketio.emit("bluetooth_debug", debug_snapshot(), to=request.sid)
 
-#Flask renders template/index.html
+#Load the prontend page
 @app.route("/")
 def index():
-    #Load the frontend page
     return render_template("index.html")
 
 
 def update_keys(bits):
+    #We update the state of keys on piano by reading the bits
     global current_bits
     changed = current_bits ^ bits
     for bit, note in enumerate(KEY_NOTES):
@@ -52,7 +55,7 @@ def update_keys(bits):
 
 
 def process_bits(line):
-    #The existing sketch sends 13 binary digits, bit 0 last, then a newline.
+    #Cleans ther data by removing line converting 13 charcters ong into 12 bits
     data = line.rstrip(b"\r\n")
     if len(data) != 13 or any(value not in b"01" for value in data):
         return False
