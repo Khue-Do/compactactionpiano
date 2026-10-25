@@ -1,94 +1,98 @@
-import asyncio
+import os
 import threading
-from flask import Flask, render_template
+import time
+from flask import Flask, render_template, request
 from flask_socketio import SocketIO
-from bleak import BleakScanner, BleakClient
+import serial
 
 #Initialize Flask and SocketIO
-app = Flask(__name__)
-socketio = SocketIO(app)
+app = Flask(__name__, template_folder=os.path.join(os.path.dirname(__file__), "../template"))
+socketio = SocketIO(app, async_mode="threading")
 
-#Standardized Bluetooth MIDI identifiers from Apple's doc specs
-MIDI_SERVICE_UUID = "03b80e5a-ede8-4b33-a751-6ce34ec4c700"
-MIDI_CHARACTERISTIC_UUID = "7772e5db-3868-4112-a1a9-f2669d106bf3"
+#Set PIANO_PORT to ESP32_Inputs' outgoing Bluetooth COM port.
+BLUETOOTH_PORT = os.environ.get("PIANO_PORT", "")
+#First 7 inputs: white keys left to right. Next 5: black keys left to right.
+KEY_NOTES = (60, 62, 64, 65, 67, 69, 71, 61, 63, 66, 68, 70)
+current_bits = 0
+received_bits = None
 
-#Flask renders templates/index.html
+
+def debug_snapshot():
+    return {"bits": received_bits, "keys": f"{current_bits:012b}" if received_bits is not None else None}
+
+
+def report_bluetooth(bits):
+    global received_bits
+    received_bits = bits
+    socketio.emit("bluetooth_debug", debug_snapshot())
+
+
+@socketio.on("connect")
+def send_bluetooth_debug():
+    socketio.emit("bluetooth_debug", debug_snapshot(), to=request.sid)
+
+#Flask renders template/index.html
 @app.route("/")
 def index():
     #Load the frontend page
     return render_template("index.html")
 
-def midi_callback(_sender, data):
-    """This function accepts two parameters passes automatically by bleak library
-    - _sender: identifies which Bluetooth device sent the data. This is intentionally unused
-    - data: A raw sequence of bytes containing the MIDI information from a piano"""
-    if len(data)<5:
-        return #Ignore if the data is too short
 
-    #Standard MIDI message
-    #data[0] and data[1] are usually header and timestamp data bytes
-    status = data[2] & 0xF0 #Note on or Note off
-    note = data[3] #Musical pitch
-    velocity = data[4] #Control the signal
+def update_keys(bits):
+    global current_bits
+    changed = current_bits ^ bits
+    for bit, note in enumerate(KEY_NOTES):
+        if changed & (1 << bit):
+            pressed = bool(bits & (1 << bit))
+            socketio.emit("piano_note", {
+                "status": "on" if pressed else "off",
+                "note": note, "velocity": 80 if pressed else 0,
+            })
+    current_bits = bits
 
-    #144 is note on and velocity > 0 is pressing
-    if status == 144 and velocity > 0:
-        #use socketio.emit() to send data to the frontend
-        socketio.emit("piano_note", {"status": "on", "note": note, "velocity": velocity})
-    #128 is note off or velocity = 0 is not pressing
-    elif status == 128 or (status == 144 and velocity == 0):
-        socketio.emit("piano_note", {"status": "off", "note": note})
 
-async def scan_and_connect():
-    """This function is for scanning and connecting to a physical portable piano continuously."""
+def process_bits(line):
+    #The existing sketch sends 13 binary digits, bit 0 last, then a newline.
+    data = line.rstrip(b"\r\n")
+    if len(data) != 13 or any(value not in b"01" for value in data):
+        return False
+    update_keys(int(data, 2) & 0x0FFF)  #Only 12 keys; ignore unused input12.
+    report_bluetooth(data.decode("ascii"))
+    return True
+
+
+def read_bluetooth():
+    if not BLUETOOTH_PORT:
+        print('Set $env:PIANO_PORT="COMx" to the Bluetooth port, then restart app.py.', flush=True)
+        return
     while True:
-        print("Scanning for MIDI piano...Make sure your piano is on!")
         try:
-            #Make the scanning time 3 seconds
-            devices = await BleakScanner.discover(timeout=3.0)
-            piano_device = None
+            report_bluetooth(None)
+            with serial.Serial(BLUETOOTH_PORT, baudrate=115200, timeout=0.1) as connection:
+                print(f"Connected to ESP32_Inputs on {BLUETOOTH_PORT}", flush=True)
+                pending = b""
+                last_packet = time.monotonic()
+                while True:
+                    chunk = connection.readline(64)
+                    pending += chunk
+                    if chunk.endswith(b"\n"):
+                        if process_bits(pending):
+                            last_packet = time.monotonic()
+                        pending = b""
+                    elif len(pending) > 64:
+                        pending = b"!"  #Ignore an oversized frame until its newline.
+                    if time.monotonic() - last_packet > 1:
+                        raise serial.SerialException("No valid key data for 1 second")
+        except (serial.SerialException, OSError) as error:
+            update_keys(0)  #Release keys if Bluetooth disconnects.
+            report_bluetooth(None)
+            print(f"Bluetooth: {error}. Retrying in 3 seconds...", flush=True)
+            time.sleep(3)
 
-            for device in devices:
-                #Search for name keywords, match with the list
-                if device.name and any(keyword in device.name.lower() for keyword in ["piano", "midi"]):
-                    piano_device = device
-                    break
-
-                #If searching for name keywords fails: Search for Bluetooth UUID services
-                if not piano_device:
-                    for uuid_device in devices:
-                        if (uuid_device.details and hasattr(uuid_device.details, "uuids") and MIDI_SERVICE_UUID in uuid_device.details.uuids):
-                            piano_device = device
-                            break
-
-                if piano_device:
-                    print(f"Connecting to {piano_device.name} ({piano_device.address})...")
-                    #Connect the device and send data to define the status, note, and velocity
-                    async with BleakClient(piano_device.address) as client:
-                        print("Connected successfully!")
-                        await client.start_notify(MIDI_CHARACTERISTIC_UUID, midi_callback)
-
-                        while client.is_connected:
-                            await asyncio.sleep(1)
-                else:
-                    print("No Bluetooth piano found. Retrying in 3 seconds...")
-        #Handle exception and allow the user to retry connecting
-        except Exception as e:
-            print(f"Connection error: {e}. Retrying in 3 seconds...")
-
-        await asyncio.sleep(3)
-
-def run_ble_loop():
-    """This function is a bridge between Flask server and the bleak Bluetooth library.
-    bleak relies heavily on Python's asyncio framework, it needs an active loop to run its await commands."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(scan_and_connect())
 
 if __name__ == "__main__":
-    #Run the BLE scanning in a background thread so flask/socketio can run on main thread
-    ble_thread = threading.Thread(target = run_ble_loop, daemon = True) #daemon = True tells the thread to shut down automatically when the user close the web server application
-    ble_thread.start()
-    #sockettio.run() run the web server while blocking the main thread to listen to the piano notes without being interrupted
-    socketio.run(app, debug = True, port = 5000)
-    #Open the website by using the html file in template while running this code
+    #Read Bluetooth in a background thread while the web server runs.
+    bluetooth_thread = threading.Thread(target=read_bluetooth, daemon=True)
+    bluetooth_thread.start()
+    socketio.run(app, debug=True, use_reloader=False, port=5000)
+    #Type http://localhost:5000 to access the website.
