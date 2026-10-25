@@ -15,6 +15,7 @@ Compact Action Piano Web Application would act as a visualizer for a physical pi
 • Run the embedded code to detect physical piano's movement
 • Run the web server while blocking anything might interrupt to listen to the key's pitch while displaying animations along side
 
-## How to run the files
+## How to run the website
 • Open template in VSC or Pycharm for app.py
 • Open the website server by clicking the template/index.html file
+• Once it's powered, it's automatically turned on
